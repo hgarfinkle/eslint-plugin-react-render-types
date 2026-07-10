@@ -1,5 +1,55 @@
-import type { TSESTree } from "@typescript-eslint/utils";
+import type { TSESLint, TSESTree } from "@typescript-eslint/utils";
 import { getJSXElementName } from "./component-utils.js";
+
+export type JSXExpressionResolver = (
+  expr: TSESTree.Expression
+) => TSESTree.Expression | null | undefined;
+
+type SourceCodeWithScopes = {
+  getScope(node: TSESTree.Node): TSESLint.Scope.Scope;
+};
+
+export function createConstArrayExpressionResolver(
+  sourceCode: SourceCodeWithScopes
+): JSXExpressionResolver {
+  return (expr) => {
+    if (expr.type === "ArrayExpression") {
+      return expr;
+    }
+
+    if (expr.type !== "Identifier") {
+      return null;
+    }
+
+    const variable = findVariable(sourceCode.getScope(expr), expr.name);
+    const definition = variable?.defs[0];
+    if (
+      definition?.type !== "Variable" ||
+      definition.parent.kind !== "const" ||
+      definition.node.init?.type !== "ArrayExpression"
+    ) {
+      return null;
+    }
+
+    return definition.node.init;
+  };
+}
+
+function findVariable(
+  scope: TSESLint.Scope.Scope,
+  name: string
+): TSESLint.Scope.Variable | undefined {
+  let currentScope: TSESLint.Scope.Scope | null = scope;
+  while (currentScope) {
+    const variable = currentScope.set.get(name);
+    if (variable) {
+      return variable;
+    }
+    currentScope = currentScope.upper;
+  }
+
+  return undefined;
+}
 
 /**
  * Recursively extract component names from a JSX expression.
@@ -14,7 +64,8 @@ import { getJSXElementName } from "./component-utils.js";
  */
 export function extractJSXFromExpression(
   expr: TSESTree.Expression | TSESTree.JSXEmptyExpression,
-  maxDepth: number = 10
+  maxDepth: number = 10,
+  resolveExpression?: JSXExpressionResolver
 ): string[] {
   if (maxDepth <= 0) return [];
 
@@ -36,7 +87,11 @@ export function extractJSXFromExpression(
           child.expression.type !== "JSXEmptyExpression"
         ) {
           fragmentResults.push(
-            ...extractJSXFromExpression(child.expression, maxDepth - 1)
+            ...extractJSXFromExpression(
+              child.expression,
+              maxDepth - 1,
+              resolveExpression
+            )
           );
         }
       }
@@ -51,35 +106,81 @@ export function extractJSXFromExpression(
 
     case "Identifier":
       if (expr.name === "undefined") return ["undefined"];
+      if (resolveExpression) {
+        const resolvedExpr = resolveExpression(expr);
+        if (resolvedExpr) {
+          return extractJSXFromExpression(
+            resolvedExpr,
+            maxDepth - 1,
+            resolveExpression
+          );
+        }
+      }
       return [];
 
     case "ConditionalExpression":
       return [
-        ...extractJSXFromExpression(expr.consequent, maxDepth - 1),
-        ...extractJSXFromExpression(expr.alternate, maxDepth - 1),
+        ...extractJSXFromExpression(
+          expr.consequent,
+          maxDepth - 1,
+          resolveExpression
+        ),
+        ...extractJSXFromExpression(
+          expr.alternate,
+          maxDepth - 1,
+          resolveExpression
+        ),
       ];
 
     case "LogicalExpression":
       if (expr.operator === "&&") {
         // For &&, the result is either falsy (left) or right
-        return extractJSXFromExpression(expr.right, maxDepth - 1);
+        return extractJSXFromExpression(
+          expr.right,
+          maxDepth - 1,
+          resolveExpression
+        );
       }
       // || and ?? — either side could be the result
       return [
-        ...extractJSXFromExpression(expr.left, maxDepth - 1),
-        ...extractJSXFromExpression(expr.right, maxDepth - 1),
+        ...extractJSXFromExpression(
+          expr.left,
+          maxDepth - 1,
+          resolveExpression
+        ),
+        ...extractJSXFromExpression(
+          expr.right,
+          maxDepth - 1,
+          resolveExpression
+        ),
       ];
 
     case "ArrayExpression": {
-      return expr.elements.flatMap((element) =>
-        element && element.type !== "SpreadElement"
-          ? extractJSXFromExpression(element, maxDepth - 1)
-          : [],
-      );
+      return expr.elements.flatMap((element) => {
+        if (!element) return [];
+        if (element.type !== "SpreadElement") {
+          return extractJSXFromExpression(
+            element,
+            maxDepth - 1,
+            resolveExpression
+          );
+        }
+
+        const resolvedArgument = resolveExpression?.(element.argument);
+        return extractJSXFromExpression(
+          resolvedArgument ?? element.argument,
+          maxDepth - 1,
+          resolveExpression
+        );
+      });
     }
 
     case "CallExpression":
-      return extractJSXFromCallExpression(expr, maxDepth - 1);
+      return extractJSXFromCallExpression(
+        expr,
+        maxDepth - 1,
+        resolveExpression
+      );
 
     default:
       return [];
@@ -91,7 +192,8 @@ export function extractJSXFromExpression(
  */
 function extractJSXFromCallExpression(
   expr: TSESTree.CallExpression,
-  maxDepth: number
+  maxDepth: number,
+  resolveExpression?: JSXExpressionResolver
 ): string[] {
   if (expr.callee.type !== "MemberExpression") return [];
   if (expr.callee.property.type !== "Identifier") return [];
@@ -105,14 +207,14 @@ function extractJSXFromCallExpression(
   if (callback.type === "ArrowFunctionExpression") {
     if (callback.body.type !== "BlockStatement") {
       // Expression body: items.map(i => <X />)
-      return extractJSXFromExpression(callback.body, maxDepth);
+      return extractJSXFromExpression(callback.body, maxDepth, resolveExpression);
     }
     // Block body: items.map(i => { return <X />; })
-    return extractJSXFromBlock(callback.body, maxDepth);
+    return extractJSXFromBlock(callback.body, maxDepth, resolveExpression);
   }
 
   if (callback.type === "FunctionExpression") {
-    return extractJSXFromBlock(callback.body, maxDepth);
+    return extractJSXFromBlock(callback.body, maxDepth, resolveExpression);
   }
 
   return [];
@@ -124,13 +226,20 @@ function extractJSXFromCallExpression(
  */
 function extractJSXFromBlock(
   block: TSESTree.BlockStatement,
-  maxDepth: number
+  maxDepth: number,
+  resolveExpression?: JSXExpressionResolver
 ): string[] {
   const results: string[] = [];
 
   for (const stmt of block.body) {
     if (stmt.type === "ReturnStatement" && stmt.argument) {
-      results.push(...extractJSXFromExpression(stmt.argument, maxDepth));
+      results.push(
+        ...extractJSXFromExpression(
+          stmt.argument,
+          maxDepth,
+          resolveExpression
+        )
+      );
     }
   }
 
@@ -148,7 +257,8 @@ function extractJSXFromAttribute(
   attr: TSESTree.JSXAttribute,
   transparentComponents: Map<string, Set<string>>,
   visited: Set<string>,
-  maxDepth: number
+  maxDepth: number,
+  resolveExpression?: JSXExpressionResolver
 ): string[] {
   if (!attr.value) return [];
 
@@ -159,18 +269,20 @@ function extractJSXFromAttribute(
         expr,
         transparentComponents,
         visited,
-        maxDepth
+        maxDepth,
+        resolveExpression
       );
     }
     if (expr.type !== "JSXEmptyExpression") {
-      return extractJSXFromExpression(expr, maxDepth);
+      return extractJSXFromExpression(expr, maxDepth, resolveExpression);
     }
   } else if (attr.value.type === "JSXElement") {
     return extractFromJSXElement(
       attr.value,
       transparentComponents,
       visited,
-      maxDepth
+      maxDepth,
+      resolveExpression
     );
   }
 
@@ -186,7 +298,8 @@ function extractFromJSXElement(
   jsxElement: TSESTree.JSXElement,
   transparentComponents: Map<string, Set<string>>,
   visited: Set<string>,
-  maxDepth: number
+  maxDepth: number,
+  resolveExpression?: JSXExpressionResolver
 ): string[] {
   const name = getJSXElementName(jsxElement);
   if (!name) return [];
@@ -203,7 +316,8 @@ function extractFromJSXElement(
     propNames,
     transparentComponents,
     visited,
-    maxDepth
+    maxDepth,
+    resolveExpression
   );
 }
 
@@ -217,7 +331,8 @@ function extractFromTransparentElement(
   propNames: Set<string>,
   transparentComponents: Map<string, Set<string>>,
   visited: Set<string>,
-  maxDepth: number
+  maxDepth: number,
+  resolveExpression?: JSXExpressionResolver
 ): string[] {
   if (maxDepth <= 0) return [];
 
@@ -231,7 +346,14 @@ function extractFromTransparentElement(
 
   // Extract from children if "children" is in propNames
   if (propNames.has("children")) {
-    extractFromChildren(jsxElement.children, transparentComponents, visited, maxDepth, results);
+    extractFromChildren(
+      jsxElement.children,
+      transparentComponents,
+      visited,
+      maxDepth,
+      results,
+      resolveExpression
+    );
   }
 
   // Extract from named prop attributes
@@ -248,7 +370,8 @@ function extractFromTransparentElement(
         attr,
         transparentComponents,
         new Set(visited),
-        maxDepth - 1
+        maxDepth - 1,
+        resolveExpression
       )
     );
   }
@@ -266,7 +389,8 @@ export function extractChildElementNames(
   jsxElement: TSESTree.JSXElement,
   transparentComponents: Map<string, Set<string>>,
   visited: Set<string> = new Set(),
-  maxDepth: number = 10
+  maxDepth: number = 10,
+  resolveExpression?: JSXExpressionResolver
 ): string[] {
   if (maxDepth <= 0) return [];
 
@@ -283,7 +407,8 @@ export function extractChildElementNames(
       propNames,
       transparentComponents,
       visited,
-      maxDepth
+      maxDepth,
+      resolveExpression
     );
   }
 
@@ -295,7 +420,14 @@ export function extractChildElementNames(
 
   const results: string[] = [];
 
-  extractFromChildren(jsxElement.children, transparentComponents, visited, maxDepth, results);
+  extractFromChildren(
+    jsxElement.children,
+    transparentComponents,
+    visited,
+    maxDepth,
+    results,
+    resolveExpression
+  );
 
   return results;
 }
@@ -308,18 +440,27 @@ function extractFromChildren(
   transparentComponents: Map<string, Set<string>>,
   visited: Set<string>,
   maxDepth: number,
-  results: string[]
+  results: string[],
+  resolveExpression?: JSXExpressionResolver
 ): void {
   for (const child of children) {
     if (child.type === "JSXFragment") {
-      extractFromChildren(child.children, transparentComponents, visited, maxDepth, results);
+      extractFromChildren(
+        child.children,
+        transparentComponents,
+        visited,
+        maxDepth,
+        results,
+        resolveExpression
+      );
     } else if (child.type === "JSXElement") {
       results.push(
         ...extractFromJSXElement(
           child,
           transparentComponents,
           new Set(visited),
-          maxDepth - 1
+          maxDepth - 1,
+          resolveExpression
         )
       );
     } else if (
@@ -327,7 +468,11 @@ function extractFromChildren(
       child.expression.type !== "JSXEmptyExpression"
     ) {
       results.push(
-        ...extractJSXFromExpression(child.expression, maxDepth - 1)
+        ...extractJSXFromExpression(
+          child.expression,
+          maxDepth - 1,
+          resolveExpression
+        )
       );
     }
   }

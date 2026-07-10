@@ -222,6 +222,36 @@ ruleTester.run("valid-render-return", rule, {
       ),
       filename: "test.tsx",
     },
+    // @renders* - many: returning const array is valid
+    {
+      name: "many renders with const array",
+      code: withComponents(
+        `
+        /** @renders* {MenuItem} */
+        function MenuItems() {
+          const items = [<MenuItem key="a" />, <MenuItem key="b" />];
+          return items;
+        }
+      `,
+        ["MenuItem"]
+      ),
+      filename: "test.tsx",
+    },
+    // @renders* - many: returning spread const array is valid
+    {
+      name: "many renders with spread const array",
+      code: withComponents(
+        `
+        /** @renders* {MenuItem} */
+        function MenuItems() {
+          const items = [<MenuItem key="a" />];
+          return [...items, <MenuItem key="b" />];
+        }
+      `,
+        ["MenuItem"]
+      ),
+      filename: "test.tsx",
+    },
     // @renders* - many: returning fragment with multiple elements is valid
     {
       name: "many renders with fragment",
@@ -1235,6 +1265,52 @@ ruleTester.run("valid-render-return", rule, {
         /** @renders* {MenuItem} */
         function MenuItems() {
           return <Footer />;
+        }
+      `,
+        ["MenuItem", "Footer"]
+      ),
+      filename: "test.tsx",
+      errors: [
+        {
+          messageId: "invalidRenderReturn",
+          data: {
+            expected: "MenuItem",
+            actual: "Footer",
+          },
+        },
+      ],
+    },
+    {
+      name: "many renders with wrong component in const array",
+      code: withComponents(
+        `
+        /** @renders* {MenuItem} */
+        function MenuItems() {
+          const items = [<MenuItem key="item" />, <Footer key="footer" />];
+          return items;
+        }
+      `,
+        ["MenuItem", "Footer"]
+      ),
+      filename: "test.tsx",
+      errors: [
+        {
+          messageId: "invalidRenderReturn",
+          data: {
+            expected: "MenuItem",
+            actual: "Footer",
+          },
+        },
+      ],
+    },
+    {
+      name: "many renders with wrong component in spread const array",
+      code: withComponents(
+        `
+        /** @renders* {MenuItem} */
+        function MenuItems() {
+          const items = [<MenuItem key="item" />, <Footer key="footer" />];
+          return [...items];
         }
       `,
         ["MenuItem", "Footer"]

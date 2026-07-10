@@ -3,7 +3,11 @@ import { ESLintUtils } from "@typescript-eslint/utils";
 import { createRule } from "../utils/create-rule.js";
 import { parseRendersAnnotation, parseTransparentAnnotation } from "../utils/jsdoc-parser.js";
 import { getJSXElementName, isComponentName, getWrappingVariableDeclarator } from "../utils/component-utils.js";
-import { extractChildElementNames, extractJSXFromExpression } from "../utils/jsx-extraction.js";
+import {
+  createConstArrayExpressionResolver,
+  extractChildElementNames,
+  extractJSXFromExpression,
+} from "../utils/jsx-extraction.js";
 import { canRenderComponentTyped } from "../utils/render-chain.js";
 import { createCrossFileResolver } from "../utils/cross-file-resolver.js";
 import type { RendersAnnotation, TransparentAnnotation, ResolvedRenderMap } from "../types/index.js";
@@ -33,6 +37,7 @@ export default createRule<[], MessageIds>({
   defaultOptions: [],
   create(context) {
     const sourceCode = context.sourceCode;
+    const resolveExpression = createConstArrayExpressionResolver(sourceCode);
 
     // Build a map of component names to their @renders annotations
     // This enables chained rendering validation
@@ -147,13 +152,19 @@ export default createRule<[], MessageIds>({
         const name = getJSXElementName(expr);
         if (name && transparentComponents.has(name)) {
           // Look through transparent wrapper
-          return extractChildElementNames(expr, transparentComponents);
+          return extractChildElementNames(
+            expr,
+            transparentComponents,
+            new Set(),
+            10,
+            resolveExpression
+          );
         }
         return name ? [name] : [];
       }
 
       // For all other expressions (ternary, &&, .map, fragments, null, etc.)
-      return extractJSXFromExpression(expr);
+      return extractJSXFromExpression(expr, 10, resolveExpression);
     }
 
     /**

@@ -3,7 +3,11 @@ import { ESLintUtils } from "@typescript-eslint/utils";
 import { createRule } from "../utils/create-rule.js";
 import { parseRendersAnnotation, parseTransparentAnnotation } from "../utils/jsdoc-parser.js";
 import { getJSXElementName, isComponentName, getWrappingVariableDeclarator } from "../utils/component-utils.js";
-import { extractChildElementNames, extractJSXFromExpression } from "../utils/jsx-extraction.js";
+import {
+  createConstArrayExpressionResolver,
+  extractChildElementNames,
+  extractJSXFromExpression,
+} from "../utils/jsx-extraction.js";
 import { canRenderComponentTyped } from "../utils/render-chain.js";
 import { createCrossFileResolver } from "../utils/cross-file-resolver.js";
 import type { RendersAnnotation, ResolvedRendersAnnotation, ResolvedRenderMap } from "../types/index.js";
@@ -35,6 +39,7 @@ export default createRule<[], MessageIds>({
   defaultOptions: [],
   create(context) {
     const sourceCode = context.sourceCode;
+    const resolveExpression = createConstArrayExpressionResolver(sourceCode);
 
     // Build a map of component names to their @renders annotations
     const localRenderMap: Map<string, RendersAnnotation> = new Map();
@@ -283,17 +288,29 @@ export default createRule<[], MessageIds>({
         if (expr.type === "JSXElement") {
           const name = getJSXElementName(expr);
           if (name && transparentComponents.has(name)) {
-            passedValues = extractChildElementNames(expr, transparentComponents);
+            passedValues = extractChildElementNames(
+              expr,
+              transparentComponents,
+              new Set(),
+              10,
+              resolveExpression
+            );
           } else if (name) {
             passedValues = [name];
           }
         } else if (expr.type !== "JSXEmptyExpression") {
-          passedValues = extractJSXFromExpression(expr);
+          passedValues = extractJSXFromExpression(expr, 10, resolveExpression);
         }
       } else if (attr.value.type === "JSXElement") {
         const name = getJSXElementName(attr.value);
         if (name && transparentComponents.has(name)) {
-          passedValues = extractChildElementNames(attr.value, transparentComponents);
+          passedValues = extractChildElementNames(
+            attr.value,
+            transparentComponents,
+            new Set(),
+            10,
+            resolveExpression
+          );
         } else if (name) {
           passedValues = [name];
         }
@@ -383,12 +400,22 @@ export default createRule<[], MessageIds>({
           if (child.type === "JSXElement") {
             const childName = getJSXElementName(child);
             if (childName && transparentComponents.has(childName)) {
-              extractedNames = extractChildElementNames(child, transparentComponents);
+              extractedNames = extractChildElementNames(
+                child,
+                transparentComponents,
+                new Set(),
+                10,
+                resolveExpression
+              );
             } else if (childName) {
               extractedNames = [childName];
             }
           } else if (child.type === "JSXExpressionContainer" && child.expression.type !== "JSXEmptyExpression") {
-            extractedNames = extractJSXFromExpression(child.expression);
+            extractedNames = extractJSXFromExpression(
+              child.expression,
+              10,
+              resolveExpression
+            );
           }
 
           for (const name of extractedNames) {
